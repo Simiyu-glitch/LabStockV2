@@ -460,6 +460,108 @@ def approve_leave(
 # Milka rejects a leave request with a reason
 # ==================================================================
 
+# ==================================================================
+# GET /leave/my-blocked-dates?staff_id=3
+# Returns date ranges already taken by THIS staff member
+# (Approved or Pending) — calendar will block these out
+# ==================================================================
+
+@router.get("/my-blocked-dates")
+def get_my_blocked_dates(
+    staff_id: int,
+    conn: sqlite3.Connection = Depends(get_db)
+):
+    _ensure_leave_table(conn)
+
+    rows = conn.execute(
+        """
+        SELECT start_date, end_date, type, status
+        FROM leave_requests
+        WHERE staff_id = ?
+          AND status NOT IN ('Rejected')
+        ORDER BY start_date
+        """,
+        (staff_id,)
+    ).fetchall()
+
+    # Expand each range into individual blocked dates
+    blocked = []
+    for r in rows:
+        d = date.fromisoformat(r["start_date"])
+        end = date.fromisoformat(r["end_date"])
+        while d <= end:
+            blocked.append(d.isoformat())
+            d += timedelta(days=1)
+
+    return {"blocked_dates": list(set(blocked))}
+
+
+# ==================================================================
+# POST /leave/check-overlap
+# Given a date range, check who else is already on leave
+# Used to show overlap warning BEFORE submission
+# Sick leave shows as count only — never reveals name to peers
+# ==================================================================
+
+class OverlapCheckRequest(BaseModel):
+    staff_id:   int     # the person requesting — exclude from results
+    start_date: str
+    end_date:   str
+
+@router.post("/check-overlap")
+def check_overlap(
+    body: OverlapCheckRequest,
+    conn: sqlite3.Connection = Depends(get_db)
+):
+    _ensure_leave_table(conn)
+    pk = _pk(conn)
+    nm = _name_col(conn)
+
+    # Find other staff with approved/pending leave overlapping this range
+    rows = conn.execute(
+        f"""
+        SELECT
+            lr.start_date,
+            lr.end_date,
+            lr.type,
+            lr.status,
+            s.{nm} AS staff_name
+        FROM leave_requests lr
+        LEFT JOIN staff s ON s.{pk} = lr.staff_id
+        WHERE lr.staff_id != ?
+          AND lr.status NOT IN ('Rejected')
+          AND NOT (lr.end_date < ? OR lr.start_date > ?)
+        ORDER BY lr.start_date
+        """,
+        (body.staff_id, body.start_date, body.end_date)
+    ).fetchall()
+
+    conflicts = []
+    for r in rows:
+        d = dict(r)
+        is_sick = d["type"] in ("Sick", "Sick Leave", "SICK")
+        conflicts.append({
+            "start_date":  d["start_date"],
+            "end_date":    d["end_date"],
+            "type":        d["type"],
+            "status":      d["status"],
+            # Sick leave: never reveal name to peers
+            "staff_name":  None if is_sick else d["staff_name"],
+            "is_private":  is_sick,
+        })
+
+    return {
+        "has_overlap":     len(conflicts) > 0,
+        "conflict_count":  len(conflicts),
+        "conflicts":       conflicts,
+    }
+
+
+# ==================================================================
+# POST /leave/reject/{request_id}
+# Milka rejects a leave request with a reason
+# ==================================================================
+
 @router.post("/reject/{request_id}")
 def reject_leave(
     request_id: int,
@@ -491,3 +593,75 @@ def reject_leave(
     conn.commit()
 
     return {"status": "rejected", "request_id": request_id}
+
+
+# ==================================================================
+# GET /leave/team-calendar?year=2026&month=6
+# Returns all staff leave for a given month
+# Used by the calendar to show names on dates
+# Sick leave: shows as "Sick" with no name — privacy rule
+# ==================================================================
+
+@router.get("/team-calendar")
+def get_team_calendar(
+    year: int,
+    month: int,
+    conn: sqlite3.Connection = Depends(get_db)
+):
+    import calendar as cal_mod
+    _ensure_leave_table(conn)
+    pk = _pk(conn)
+    nm = _name_col(conn)
+
+    _, last_day = cal_mod.monthrange(year, month)
+    month_start = f"{year}-{month:02d}-01"
+    month_end   = f"{year}-{month:02d}-{last_day:02d}"
+
+    rows = conn.execute(
+        f"""
+        SELECT
+            lr.id,
+            lr.staff_id,
+            lr.start_date,
+            lr.end_date,
+            lr.type,
+            lr.status,
+            lr.requested_by,
+            s.{nm}           AS familiar_name
+        FROM leave_requests lr
+        LEFT JOIN staff s ON s.{pk} = lr.staff_id
+        WHERE lr.status NOT IN ('Rejected')
+          AND NOT (lr.end_date < ? OR lr.start_date > ?)
+        ORDER BY lr.start_date
+        """,
+        (month_start, month_end)
+    ).fetchall()
+
+    # Build a dict: date_str -> list of entries
+    day_map = {}
+
+    for r in rows:
+        d = dict(r)
+        is_sick    = d["type"] in ("Sick", "Sick Leave", "SICK", "sick", "sick off", "Sick off", "Sick Off")
+        start      = date.fromisoformat(d["start_date"])
+        end        = date.fromisoformat(d["end_date"])
+
+        # Clamp to this month
+        clamp_start = max(start, date(year, month, 1))
+        clamp_end   = min(end,   date(year, month, last_day))
+
+        current = clamp_start
+        while current <= clamp_end:
+            iso = current.isoformat()
+            if iso not in day_map:
+                day_map[iso] = []
+            day_map[iso].append({
+                "staff_id":     d["staff_id"],
+                "familiar_name": None if is_sick else (d["familiar_name"] or d.get("requested_by") or "Staff"),
+                "type":         d["type"],
+                "status":       d["status"],
+                "is_private":   is_sick,
+            })
+            current += timedelta(days=1)
+
+    return {"days": day_map}

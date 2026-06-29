@@ -47,6 +47,7 @@ class LoginResponse(BaseModel):
     familiar_name: str   # "Erick" — shown on screen (Law 4)
     full_name: str       # "Erick Wamae" — for audit trail (Law 4)
     role: str            # "mlt", "hod", "manager", "director", etc.
+    staff_id: int
 
 # ── HELPER: HASH A PASSWORD ──────────────────────────────────
 def hash_pin(plain: str) -> str:
@@ -116,6 +117,7 @@ def login(body: LoginRequest):
             familiar_name = row["familiar_name"],
             full_name     = row["full_name"],
             role          = row["role"],
+            staff_id      = row["staff_id"],
         )
 
     finally:

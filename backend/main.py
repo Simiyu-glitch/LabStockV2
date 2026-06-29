@@ -8,6 +8,7 @@ import charts
 import communications
 import tasks_api
 import rota_api
+import leave_api
 
 app = FastAPI(title="LabStockV2 API", version="2.0.0")
 
@@ -24,6 +25,7 @@ app.include_router(charts.router)
 app.include_router(communications.router)
 app.include_router(tasks_api.router)
 app.include_router(rota_api.router)
+app.include_router(leave_api.router)
 
 @app.get("/")
 def root():
